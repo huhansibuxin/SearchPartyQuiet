@@ -4,3 +4,5 @@ obj/
 *.deb
 *.dSYM/
 .DS_Store
+
+dist/
