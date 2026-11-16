@@ -1,5 +1,5 @@
-// SearchPartyQuiet v1.0.0 - block useless ObservationStore writes in searchpartyd
-//                            arm64e / rootless + roothide
+// SearchPartyQuiet v1.0.1 - block useless ObservationStore writes in searchpartyd
+//                            arm64e / roothide only
 // =============================================================================
 // WHAT THIS DOES
 //   searchpartyd burns 50-93% CPU for 1-10 s roughly every 15 minutes. Root
@@ -101,7 +101,7 @@
 
 // CI asserts this exact build tag is present in the dylib.
 static const char kBuildTag[] __attribute__((used)) =
-    "SearchPartyQuiet 1.0.0 QUIET auth-got-rebind observation-insert-skip";
+    "SearchPartyQuiet 1.0.1 QUIET auth-got-rebind observation-insert-skip roothide-only";
 
 #define kFlagDir        "/var/mobile/Documents/SearchPartyQuiet"
 #define kFlagOff        kFlagDir "/DISABLED"
@@ -129,7 +129,6 @@ static int g_mode = MODE_QUIET;
 static int g_logfd = -1;
 static const char *g_logpath = "(none)";
 static int g_openErrno[4] = {0, 0, 0, 0};
-static unsigned long long g_seq = 0;
 
 // ---- tiny libSystem-only logger -------------------------------------------
 static unsigned long long now_ms(void) {
@@ -465,7 +464,7 @@ __attribute__((constructor)) static void spq_init(void) {
     else if (flag_exists("PASSTHROUGH_ALL")) g_mode = MODE_PASS;
 
     open_log();
-    plog("START %llu build=1.0.0 mode=%d pid=%d uid=%d proc=searchpartyd log=%s "
+    plog("START %llu build=1.0.1 mode=%d pid=%d uid=%d proc=searchpartyd log=%s "
          "errno=[%d,%d,%d,%d] logfd=%d\n",
          now_ms(), g_mode, (int)getpid(), (int)getuid(), g_logpath,
          g_openErrno[0], g_openErrno[1], g_openErrno[2], g_openErrno[3], g_logfd);

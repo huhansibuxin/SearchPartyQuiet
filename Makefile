@@ -1,11 +1,11 @@
-# SearchPartyQuiet v1.0.0 - single auth-GOT rebind of _sqlite3_step in
-#   searchpartyd (rootless + roothide)
+# SearchPartyQuiet v1.0.1 - single auth-GOT rebind of _sqlite3_step in
+#   searchpartyd (roothide only, starting 2026-11-16 per 老板)
 # THEOS_PACKAGE_SCHEME is overridden by CI per matrix job; the ?= below is
 # only the local default (never use '=' here).
 export TARGET = iphone:clang:latest:16.0
 export ARCHS = arm64e
 
-THEOS_PACKAGE_SCHEME ?= rootless
+THEOS_PACKAGE_SCHEME ?= roothide
 export THEOS_PACKAGE_SCHEME
 export _THEOS_PLATFORM_DPKG_DEB_COMPRESSION = gzip
 
