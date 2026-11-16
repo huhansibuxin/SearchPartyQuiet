@@ -1,4 +1,4 @@
-// SearchPartyQuiet v1.0.2 - block useless ObservationStore writes in searchpartyd
+// SearchPartyQuiet v1.0.3 - block useless ObservationStore writes in searchpartyd
 //                            arm64e / roothide only
 // =============================================================================
 // WHAT THIS DOES
@@ -57,13 +57,12 @@
 //   PROBE_ONLY        probe  - rebind + log every INSERT, but call original
 //   PASSTHROUGH_ALL   pass   - no rebind at all, stock behaviour
 //   DISABLED          off    - no constructor work at all
-//   Log (first writable wins - a single hardcoded path silently fails):
-//     $TMPDIR/SearchPartyQuiet.log
-//     /var/mobile/Documents/SearchPartyQuiet/quiet.log
-//     /var/mobile/Library/Logs/SearchPartyQuiet.log
-//     /var/tmp/SearchPartyQuiet.log            <-- real one on device
-//     /private/var/tmp/SearchPartyQuiet.log
-//   With SSH prepend /rootfs/private. Flags may be dropped in any of those dirs.
+//   Log: ONE hardcoded path /var/tmp/SearchPartyQuiet.log (v1.0.3). No TMPDIR
+//   rotation, no multi-candidate - that made the log land in a second container
+//   view and silently disappear. SSH reads /rootfs/private/var/tmp/SearchPartyQuiet.log.
+//   Boot proof: a constructor(100) writes "BOOT ctor-executed" before anything
+//   else; its presence proves constructors ran, its absence = injection issue.
+//   Flags may be dropped in /var/mobile/Documents/SearchPartyQuiet/ or /var/tmp/.
 //
 // HARD CONSTRAINTS
 //   - ZERO Logos %hook / ZERO substrate / ZERO ellekit LINK dependency.
@@ -101,7 +100,7 @@
 
 // CI asserts this exact build tag is present in the dylib.
 static const char kBuildTag[] __attribute__((used)) =
-    "SearchPartyQuiet 1.0.2 QUIET auth-got-rebind observation-insert-skip roothide-only";
+    "SearchPartyQuiet 1.0.3 QUIET auth-got-rebind observation-insert-skip roothide-only";
 
 #define kFlagDir        "/var/mobile/Documents/SearchPartyQuiet"
 #define kFlagOff        kFlagDir "/DISABLED"
@@ -109,26 +108,21 @@ static const char kBuildTag[] __attribute__((used)) =
 #define kFlagProbe      kFlagDir "/PROBE_ONLY"
 #define kStatePath      "/private/var/tmp/SearchPartyQuiet.state"
 
-static const char *kLogCandidates[] = {
-    "/var/mobile/Documents/SearchPartyQuiet/quiet.log",
-    "/var/mobile/Library/Logs/SearchPartyQuiet.log",
-    "/var/tmp/SearchPartyQuiet.log",
-    "/private/var/tmp/SearchPartyQuiet.log",
-};
-static const char *kLogDirs[] = {
-    "/var/mobile/Documents/SearchPartyQuiet",
-    "/var/mobile/Library/Logs",
-    "/var/tmp",
-    "/private/var/tmp",
-};
-#define kCandCount (sizeof(kLogCandidates) / sizeof(kLogCandidates[0]))
+// v1.0.3: ONE hardcoded log path. The old multi-candidate + $TMPDIR rotation
+// (v1.0.1/1.0.2) let the log land in a *different container view*: after
+// kickstart the process TMPDIR was writable, so open_log() picked it and the
+// real /var/tmp/SearchPartyQuiet.log was never touched -> looked like "ctor
+// never ran / inject didn't work" even though LCOA showed the dylib mapped.
+// Process-view /var/tmp == SSH /rootfs/private/var/tmp on this device (v1.0.1
+// proved it). Single fixed path removes all ambiguity.
+#define kLogPath "/var/tmp/SearchPartyQuiet.log"
 
 enum { MODE_OFF = 0, MODE_QUIET = 1, MODE_PROBE = 2, MODE_PASS = 3 };
 
 static int g_mode = MODE_QUIET;
 static int g_logfd = -1;
 static const char *g_logpath = "(none)";
-static int g_openErrno[4] = {0, 0, 0, 0};
+static int g_openErrno = 0;
 
 // ---- tiny libSystem-only logger -------------------------------------------
 static unsigned long long now_ms(void) {
@@ -160,23 +154,11 @@ static void plog(const char *fmt, ...) {
     (void)write(g_logfd, line, (size_t)m);
 }
 
-static char g_dynLog[512];
-
+// v1.0.3: single hardcoded path, no mkdir, no getenv, no rotation.
 static void open_log(void) {
-    const char *tmp = getenv("TMPDIR");
-    if (tmp && *tmp) {
-        int n = snprintf(g_dynLog, sizeof(g_dynLog), "%s/SearchPartyQuiet.log", tmp);
-        if (n > 0 && n < (int)sizeof(g_dynLog)) {
-            int fd = open(g_dynLog, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            if (fd >= 0) { g_logfd = fd; g_logpath = g_dynLog; return; }
-        }
-    }
-    for (size_t i = 0; i < kCandCount; i++) {
-        (void)mkdir(kLogDirs[i], 0755);
-        int fd = open(kLogCandidates[i], O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (fd >= 0) { g_logfd = fd; g_logpath = kLogCandidates[i]; return; }
-        g_openErrno[i] = errno;
-    }
+    int fd = open(kLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) { g_logfd = fd; g_logpath = kLogPath; return; }
+    g_openErrno = errno;
 }
 
 static int flag_exists(const char *name) {
@@ -475,19 +457,40 @@ static int spq_install_hook(void) {
 #endif
 }
 
+// ---- boot proof (v1.0.3) ---------------------------------------------------
+// Priority 100 runs BEFORE the default-priority ctor below. It uses only
+// open()+write() of a pre-built constant buffer: NO plog, NO vsnprintf, NO
+// getenv, NO flag checks, NO early return. If dylib injection happened but
+// constructors are not being executed at all, this line will be absent and we
+// know definitively the problem is injection/ctor, not the hook logic.
+// If this line is present but START is not, open_log() itself failed.
+__attribute__((constructor(100))) static void spq_boot_proof(void) {
+    int fd = open(kLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    static const char boot[] = "BOOT ctor-executed build=1.0.3\n";
+    (void)write(fd, boot, sizeof(boot) - 1);
+    close(fd);
+}
+
 // ---- ctor -----------------------------------------------------------------
 __attribute__((constructor)) static void spq_init(void) {
-    if (flag_exists("DISABLED")) return;
+    // v1.0.3: open the log and write START FIRST, before any flag check or
+    // return. In v1.0.2 a DISABLED flag seen in any of the two container views
+    // returned here before a single log line was written -> looked like "ctor
+    // never ran". Now every path leaves evidence.
+    open_log();
+    plog("START %llu build=1.0.3 mode=%d pid=%d uid=%d proc=searchpartyd log=%s "
+         "errno=%d logfd=%d\n",
+         now_ms(), g_mode, (int)getpid(), (int)getuid(), g_logpath,
+         g_openErrno, g_logfd);
+
+    if (flag_exists("DISABLED")) { plog("STOP DISABLED flag present -> no hooks\n"); return; }
 
     g_mode = MODE_QUIET;
     if (flag_exists("PROBE_ONLY"))           g_mode = MODE_PROBE;
     else if (flag_exists("PASSTHROUGH_ALL")) g_mode = MODE_PASS;
-
-    open_log();
-    plog("START %llu build=1.0.2 mode=%d pid=%d uid=%d proc=searchpartyd log=%s "
-         "errno=[%d,%d,%d,%d] logfd=%d\n",
-         now_ms(), g_mode, (int)getpid(), (int)getuid(), g_logpath,
-         g_openErrno[0], g_openErrno[1], g_openErrno[2], g_openErrno[3], g_logfd);
+    plog("MODE resolved=%d (probe=%d pass=%d)\n", g_mode,
+         (int)flag_exists("PROBE_ONLY"), (int)flag_exists("PASSTHROUGH_ALL"));
 
     if (g_mode == MODE_PASS) { plog("REBIND SKIPPED mode=PASSTHROUGH_ALL (stock SQLite)\n"); return; }
 
