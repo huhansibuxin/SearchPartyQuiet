@@ -82,7 +82,7 @@ jobs:
           DYLIB=$(find .theos -name 'SearchPartyQuiet.dylib' -type f -not -path '*.dSYM*' | head -1)
           STRINGS=$(strings -a "$DYLIB")
           for NEEDLE in \
-            'SearchPartyQuiet 1.0.3 QUIET' \
+            'SearchPartyQuiet 1.0.4 QUIET' \
             'hooked=_sqlite3_step' \
             'readvia=sqlite3_sql' \
             'observedadvertisement' \

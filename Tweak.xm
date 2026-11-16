@@ -1,4 +1,4 @@
-// SearchPartyQuiet v1.0.3 - block useless ObservationStore writes in searchpartyd
+// SearchPartyQuiet v1.0.4 - block useless ObservationStore writes in searchpartyd
 //                            arm64e / roothide only
 // =============================================================================
 // WHAT THIS DOES
@@ -57,11 +57,14 @@
 //   PROBE_ONLY        probe  - rebind + log every INSERT, but call original
 //   PASSTHROUGH_ALL   pass   - no rebind at all, stock behaviour
 //   DISABLED          off    - no constructor work at all
-//   Log: ONE hardcoded path /var/tmp/SearchPartyQuiet.log (v1.0.3). No TMPDIR
-//   rotation, no multi-candidate - that made the log land in a second container
-//   view and silently disappear. SSH reads /rootfs/private/var/tmp/SearchPartyQuiet.log.
-//   Boot proof: a constructor(100) writes "BOOT ctor-executed" before anything
-//   else; its presence proves constructors ran, its absence = injection issue.
+//   Log (v1.0.4, EXACTLY the PowerlogProbe planC3 method): mkdir(kDir,0755)
+//   then open(kLogPath, O_WRONLY|O_CREAT|O_APPEND, 0644) in ctor. First
+//   candidate is the daemon's OWN data dir it already writes Observations.db
+//   into (mobile:mobile, guaranteed writable):
+//     /var/mobile/Library/com.apple.icloud.searchpartyd/SearchPartyQuiet.log
+//   fallback /var/tmp/SearchPartyQuiet.log. SSH prepend /rootfs/private.
+//   NO TMPDIR/getenv - that was the v1.0.1/1.0.2 trap (view mismatch).
+//   Boot proof: constructor(100) writes "BOOT ctor-executed" before anything.
 //   Flags may be dropped in /var/mobile/Documents/SearchPartyQuiet/ or /var/tmp/.
 //
 // HARD CONSTRAINTS
@@ -100,7 +103,7 @@
 
 // CI asserts this exact build tag is present in the dylib.
 static const char kBuildTag[] __attribute__((used)) =
-    "SearchPartyQuiet 1.0.3 QUIET auth-got-rebind observation-insert-skip roothide-only";
+    "SearchPartyQuiet 1.0.4 QUIET auth-got-rebind observation-insert-skip roothide-only";
 
 #define kFlagDir        "/var/mobile/Documents/SearchPartyQuiet"
 #define kFlagOff        kFlagDir "/DISABLED"
@@ -108,14 +111,17 @@ static const char kBuildTag[] __attribute__((used)) =
 #define kFlagProbe      kFlagDir "/PROBE_ONLY"
 #define kStatePath      "/private/var/tmp/SearchPartyQuiet.state"
 
-// v1.0.3: ONE hardcoded log path. The old multi-candidate + $TMPDIR rotation
-// (v1.0.1/1.0.2) let the log land in a *different container view*: after
-// kickstart the process TMPDIR was writable, so open_log() picked it and the
-// real /var/tmp/SearchPartyQuiet.log was never touched -> looked like "ctor
-// never ran / inject didn't work" even though LCOA showed the dylib mapped.
-// Process-view /var/tmp == SSH /rootfs/private/var/tmp on this device (v1.0.1
-// proved it). Single fixed path removes all ambiguity.
-#define kLogPath "/var/tmp/SearchPartyQuiet.log"
+// v1.0.4: EXACTLY the PowerlogProbe v1.2.0 planC3 log method (= the only
+// agg build that ever wrote a log). That build did mkdir(kDir,0755) then
+// open(kLogPath, O_WRONLY|O_CREAT|O_APPEND, 0644) in %ctor, and its log landed
+// in a DIRECTORY THE PROCESS ITSELF OWNS. Our v1.0.3 /var/tmp single path
+// produced no log at all: searchpartyd is a sandbox'd mobile daemon whose
+// /var/tmp view differs from SSH's; its OWN data dir (where Observations.db
+// lives, mobile:mobile 750) is guaranteed writable - fs_usage proves it writes
+// there every spike. So: write into that dir first, /var/tmp as fallback.
+#define kLogDir0  "/var/mobile/Library/com.apple.icloud.searchpartyd"
+#define kLogPath  kLogDir0 "/SearchPartyQuiet.log"
+#define kLogPath2 "/var/tmp/SearchPartyQuiet.log"
 
 enum { MODE_OFF = 0, MODE_QUIET = 1, MODE_PROBE = 2, MODE_PASS = 3 };
 
@@ -123,6 +129,7 @@ static int g_mode = MODE_QUIET;
 static int g_logfd = -1;
 static const char *g_logpath = "(none)";
 static int g_openErrno = 0;
+static int g_openErrno2 = 0;
 
 // ---- tiny libSystem-only logger -------------------------------------------
 static unsigned long long now_ms(void) {
@@ -154,11 +161,18 @@ static void plog(const char *fmt, ...) {
     (void)write(g_logfd, line, (size_t)m);
 }
 
-// v1.0.3: single hardcoded path, no mkdir, no getenv, no rotation.
+// v1.0.4: byte-for-byte the PowerlogProbe v1.2.0 method - mkdir(kDir,0755)
+// then open(O_WRONLY|O_CREAT|O_APPEND,0644). Two candidates, process-owned
+// data dir FIRST (fs_usage proves searchpartyd can write there every spike),
+// /var/tmp second. No getenv/TMPDIR: that was the v1.0.1/1.0.2 trap.
 static void open_log(void) {
+    (void)mkdir(kLogDir0, 0755);
     int fd = open(kLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) { g_logfd = fd; g_logpath = kLogPath; return; }
     g_openErrno = errno;
+    fd = open(kLogPath2, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd >= 0) { g_logfd = fd; g_logpath = kLogPath2; return; }
+    g_openErrno2 = errno;
 }
 
 static int flag_exists(const char *name) {
@@ -465,9 +479,11 @@ static int spq_install_hook(void) {
 // know definitively the problem is injection/ctor, not the hook logic.
 // If this line is present but START is not, open_log() itself failed.
 __attribute__((constructor(100))) static void spq_boot_proof(void) {
+    (void)mkdir(kLogDir0, 0755);
     int fd = open(kLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) fd = open(kLogPath2, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
-    static const char boot[] = "BOOT ctor-executed build=1.0.3\n";
+    static const char boot[] = "BOOT ctor-executed build=1.0.4\n";
     (void)write(fd, boot, sizeof(boot) - 1);
     close(fd);
 }
@@ -479,10 +495,10 @@ __attribute__((constructor)) static void spq_init(void) {
     // returned here before a single log line was written -> looked like "ctor
     // never ran". Now every path leaves evidence.
     open_log();
-    plog("START %llu build=1.0.3 mode=%d pid=%d uid=%d proc=searchpartyd log=%s "
-         "errno=%d logfd=%d\n",
+    plog("START %llu build=1.0.4 mode=%d pid=%d uid=%d proc=searchpartyd log=%s "
+         "errno=[%d,%d] logfd=%d\n",
          now_ms(), g_mode, (int)getpid(), (int)getuid(), g_logpath,
-         g_openErrno, g_logfd);
+         g_openErrno, g_openErrno2, g_logfd);
 
     if (flag_exists("DISABLED")) { plog("STOP DISABLED flag present -> no hooks\n"); return; }
 
