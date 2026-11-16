@@ -1,4 +1,4 @@
-// SearchPartyQuiet v1.0.1 - block useless ObservationStore writes in searchpartyd
+// SearchPartyQuiet v1.0.2 - block useless ObservationStore writes in searchpartyd
 //                            arm64e / roothide only
 // =============================================================================
 // WHAT THIS DOES
@@ -101,7 +101,7 @@
 
 // CI asserts this exact build tag is present in the dylib.
 static const char kBuildTag[] __attribute__((used)) =
-    "SearchPartyQuiet 1.0.1 QUIET auth-got-rebind observation-insert-skip roothide-only";
+    "SearchPartyQuiet 1.0.2 QUIET auth-got-rebind observation-insert-skip roothide-only";
 
 #define kFlagDir        "/var/mobile/Documents/SearchPartyQuiet"
 #define kFlagOff        kFlagDir "/DISABLED"
@@ -419,7 +419,10 @@ static int spq_install_hook(void) {
         plog("REBIND MISS not code (fail-open)\n");
         return 0;
     }
-    if (addr == (uintptr_t)spq_wrap_step) {
+    // Compare against the STRIPPED wrapper address: the raw (void*)fn here is
+    // pre-signed (PAC bits), while `addr` came from ptrauth_strip(). Comparing
+    // the two would never match and a double ctor would self-hook -> crash.
+    if (addr == (uintptr_t)ptrauth_strip((void *)spq_wrap_step, ptrauth_key_asia)) {
         plog("REBIND SKIP already-ours (double ctor, fail-open)\n");
         return 0;
     }
@@ -444,13 +447,30 @@ static int spq_install_hook(void) {
         plog("REBIND MISS vm_protect kr=%d (fail-open)\n", (int)kr);
         g_origStep = NULL; return 0;
     }
-    void *newSigned = ptrauth_sign_unauthenticated((void *)spq_wrap_step,
-                                                    ptrauth_key_asia, disc);
+    // v1.0.2 CRASH FIX: `spq_wrap_step` used here as (void*) is an arm64e
+    // FUNCTION POINTER CONSTANT - clang emits it ALREADY SIGNED (IA, mod 0).
+    // Device v1.0.1 log proved it: wrap=0x8b440001040250e8 (PAC=0x8b44 baked in).
+    // Feeding that pre-signed value to ptrauth_sign_unauthenticated() produces
+    // a double-signed pointer with garbage PAC. Callers use `braa x16, x17`
+    // (x17 = slot), auth fails at wrapper entry -> EXC_BAD_ACCESS / PAC fault on
+    // the very first step (3/3 IPS at 23:02:30, FR0 = wrapper dylib+0x50e8).
+    // CacheDeleteQuiet's array-of-wrappers worked because array elements are
+    // stripped data pointers; our direct (void*)fn was pre-signed. FIX: strip
+    // the function pointer to its raw address FIRST, then sign with `disc`,
+    // and prove the round trip numerically BEFORE writing to the GOT.
+    void *wrapRaw = ptrauth_strip((void *)spq_wrap_step, ptrauth_key_asia);
+    void *newSigned = ptrauth_sign_unauthenticated(wrapRaw, ptrauth_key_asia, disc);
+    if (ptrauth_auth_data(newSigned, ptrauth_key_asia, disc) != wrapRaw) {
+        plog("REBIND MISS wrapper re-auth round-trip failed (fail-open)\n");
+        g_origStep = NULL;
+        (void)vm_protect(mach_task_self(), page, (vm_size_t)pagesize, 0, VM_PROT_READ);
+        return 0;
+    }
     *slot = newSigned;
     (void)vm_protect(mach_task_self(), page, (vm_size_t)pagesize, 0, VM_PROT_READ);
     g_bound = 1;
-    plog("REBIND OK slot=%p orig=0x%llX wrap=%p disc=%d mode=%d\n",
-         (void *)slot, (unsigned long long)addr, (void *)spq_wrap_step, which, g_mode);
+    plog("REBIND OK slot=%p orig=0x%llX wrapRaw=%p signed=%p disc=%d mode=%d\n",
+         (void *)slot, (unsigned long long)addr, wrapRaw, newSigned, which, g_mode);
     return 1;
 #endif
 }
@@ -464,7 +484,7 @@ __attribute__((constructor)) static void spq_init(void) {
     else if (flag_exists("PASSTHROUGH_ALL")) g_mode = MODE_PASS;
 
     open_log();
-    plog("START %llu build=1.0.1 mode=%d pid=%d uid=%d proc=searchpartyd log=%s "
+    plog("START %llu build=1.0.2 mode=%d pid=%d uid=%d proc=searchpartyd log=%s "
          "errno=[%d,%d,%d,%d] logfd=%d\n",
          now_ms(), g_mode, (int)getpid(), (int)getuid(), g_logpath,
          g_openErrno[0], g_openErrno[1], g_openErrno[2], g_openErrno[3], g_logfd);
