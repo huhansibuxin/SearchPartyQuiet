@@ -11,6 +11,8 @@ jobs:
     strategy:
       matrix:
         variant: [roothide]
+        # v1.0.5: CLEAN = zero log (default daily driver); LOG = full diagnostics
+        flavor: [clean, log]
 
     steps:
       - name: Checkout
@@ -51,7 +53,7 @@ jobs:
           grep 'searchpartyd' SearchPartyQuiet.plist
 
       - name: Build
-        run: make package
+        run: SPQ_FLAVOR=${{ matrix.flavor }} make package
 
       # searchpartyd is a launchd daemon. Any substrate/ellekit/UIKit/Foundation
       # static link means silent dlopen failure or a heavy framework in a small
@@ -81,8 +83,10 @@ jobs:
         run: |
           DYLIB=$(find .theos -name 'SearchPartyQuiet.dylib' -type f -not -path '*.dSYM*' | head -1)
           STRINGS=$(strings -a "$DYLIB")
+          echo "== flavor = ${{ matrix.flavor }} =="
+          # Common to BOTH flavors: build tag, PAC rebind, quiet tables, flags.
           for NEEDLE in \
-            'SearchPartyQuiet 1.0.4 QUIET' \
+            'SearchPartyQuiet 1.0.5' \
             'hooked=_sqlite3_step' \
             'readvia=sqlite3_sql' \
             'observedadvertisement' \
@@ -91,15 +95,29 @@ jobs:
             'DISABLED' \
             'GUARD' \
             'REBIND' \
-            'READY' \
-            'BOOT ctor-executed' \
-            'SearchPartyQuiet.log'; do
+            'READY'; do
             if ! echo "$STRINGS" | grep -qiF "$NEEDLE"; then
               echo "::error::required string missing from dylib: $NEEDLE"
               exit 1
             fi
           done
-          echo "OK: build tag + PAC rebind + quiet tables + flags + log path present"
+          echo "OK: build tag + PAC rebind + quiet tables + flags present"
+          if [ "${{ matrix.flavor }}" = "clean" ]; then
+            echo "$STRINGS" | grep -qiF 'CLEAN QUIET' || { echo "::error::CLEAN tag missing"; exit 1; }
+            echo "$STRINGS" | grep -qiF 'no-log' || { echo "::error::no-log tag missing"; exit 1; }
+            for FORBIDDEN_CLEAN in 'SearchPartyQuiet.log' 'BOOT ctor-executed'; do
+              if echo "$STRINGS" | grep -qiF "$FORBIDDEN_CLEAN"; then
+                echo "::error::CLEAN build still contains logging string: $FORBIDDEN_CLEAN"
+                exit 1
+              fi
+            done
+            echo "OK: CLEAN dylib has NO logging strings"
+          else
+            echo "$STRINGS" | grep -qiF 'LOG QUIET' || { echo "::error::LOG tag missing"; exit 1; }
+            echo "$STRINGS" | grep -qiF 'with-log' || { echo "::error::with-log tag missing"; exit 1; }
+            echo "$STRINGS" | grep -qiF 'SearchPartyQuiet.log' || { echo "::error::LOG build missing log path"; exit 1; }
+            echo "OK: LOG dylib has logging strings"
+          fi
           for FORBIDDEN in 'MSHookFunction' 'logos' 'UIApplication'; do
             if echo "$STRINGS" | grep -qiF "$FORBIDDEN"; then
               echo "::error::unexpected symbol in dylib: $FORBIDDEN"
@@ -111,5 +129,5 @@ jobs:
       - name: Upload deb
         uses: actions/upload-artifact@v4
         with:
-          name: SearchPartyQuiet-${{ matrix.variant }}
+          name: SearchPartyQuiet-${{ matrix.variant }}-${{ matrix.flavor }}
           path: packages/*.deb

@@ -20,6 +20,14 @@ SearchPartyQuiet_FILES = Tweak.xm
 # rebound slot. No Foundation / UIKit. arm64e is REQUIRED (ptrauth builtins).
 SearchPartyQuiet_LDFLAGS = -Wl,-dead_strip_dylibs -lsqlite3
 SearchPartyQuiet_CFLAGS = -Os
+
+# v1.0.5 dual flavor: LOG keeps on-disk logging, CLEAN (default) compiles it out.
+# CI passes SPQ_FLAVOR=log|clean; hook/PAC/guard logic is IDENTICAL in both.
+ifeq ($(SPQ_FLAVOR),log)
+SearchPartyQuiet_CFLAGS += -DSPQ_NO_LOG=0
+else
+SearchPartyQuiet_CFLAGS += -DSPQ_NO_LOG=1
+endif
 ERROR_ON_WARNINGS = 0
 
 include $(THEOS)/makefiles/common.mk

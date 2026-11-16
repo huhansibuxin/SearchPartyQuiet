@@ -1,5 +1,7 @@
-// SearchPartyQuiet v1.0.4 - block useless ObservationStore writes in searchpartyd
-//                            arm64e / roothide only
+// SearchPartyQuiet v1.0.5 CLEAN - block useless ObservationStore writes in searchpartyd
+//                            arm64e / roothide only / NO LOG
+// v1.0.5 = v1.0.4 hook logic byte-for-byte unchanged; ONLY the on-disk log is
+//          compiled out (SPQ_NO_LOG). No file is ever opened/written by us.
 // =============================================================================
 // WHAT THIS DOES
 //   searchpartyd burns 50-93% CPU for 1-10 s roughly every 15 minutes. Root
@@ -102,8 +104,21 @@
 #endif
 
 // CI asserts this exact build tag is present in the dylib.
+// v1.0.5 ships TWO flavors from ONE source tree (hook logic identical):
+//   CLEAN (default): SPQ_NO_LOG=1 -> zero on-disk logging
+//   LOG:             SPQ_NO_LOG=0 -> full log (diagnostics)
+// The Makefile passes -DSPQ_NO_LOG=<0|1> per CI matrix flavor.
+#ifndef SPQ_NO_LOG
+#define SPQ_NO_LOG 1
+#endif
+
+#if SPQ_NO_LOG
 static const char kBuildTag[] __attribute__((used)) =
-    "SearchPartyQuiet 1.0.4 QUIET auth-got-rebind observation-insert-skip roothide-only";
+    "SearchPartyQuiet 1.0.5 CLEAN QUIET auth-got-rebind observation-insert-skip roothide-only no-log";
+#else
+static const char kBuildTag[] __attribute__((used)) =
+    "SearchPartyQuiet 1.0.5 LOG QUIET auth-got-rebind observation-insert-skip roothide-only with-log";
+#endif
 
 #define kFlagDir        "/var/mobile/Documents/SearchPartyQuiet"
 #define kFlagOff        kFlagDir "/DISABLED"
@@ -139,6 +154,9 @@ static unsigned long long now_ms(void) {
 }
 
 static void plog(const char *fmt, ...) {
+#if SPQ_NO_LOG
+    (void)fmt; return;
+#else
     if (g_logfd < 0) return;
     char body[1024];
     va_list ap;
@@ -159,6 +177,7 @@ static void plog(const char *fmt, ...) {
     if (m <= 0) return;
     if (m > (int)sizeof(line) - 1) m = (int)sizeof(line) - 1;
     (void)write(g_logfd, line, (size_t)m);
+#endif
 }
 
 // v1.0.4: byte-for-byte the PowerlogProbe v1.2.0 method - mkdir(kDir,0755)
@@ -166,6 +185,9 @@ static void plog(const char *fmt, ...) {
 // data dir FIRST (fs_usage proves searchpartyd can write there every spike),
 // /var/tmp second. No getenv/TMPDIR: that was the v1.0.1/1.0.2 trap.
 static void open_log(void) {
+#if SPQ_NO_LOG
+    return;   // CLEAN build: never touch the filesystem
+#else
     (void)mkdir(kLogDir0, 0755);
     int fd = open(kLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) { g_logfd = fd; g_logpath = kLogPath; return; }
@@ -173,6 +195,7 @@ static void open_log(void) {
     fd = open(kLogPath2, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd >= 0) { g_logfd = fd; g_logpath = kLogPath2; return; }
     g_openErrno2 = errno;
+#endif
 }
 
 static int flag_exists(const char *name) {
@@ -479,6 +502,9 @@ static int spq_install_hook(void) {
 // know definitively the problem is injection/ctor, not the hook logic.
 // If this line is present but START is not, open_log() itself failed.
 __attribute__((constructor(100))) static void spq_boot_proof(void) {
+#if SPQ_NO_LOG
+    return;   // CLEAN build: no boot-proof file either
+#else
     (void)mkdir(kLogDir0, 0755);
     int fd = open(kLogPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) fd = open(kLogPath2, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -486,6 +512,7 @@ __attribute__((constructor(100))) static void spq_boot_proof(void) {
     static const char boot[] = "BOOT ctor-executed build=1.0.4\n";
     (void)write(fd, boot, sizeof(boot) - 1);
     close(fd);
+#endif
 }
 
 // ---- ctor -----------------------------------------------------------------
